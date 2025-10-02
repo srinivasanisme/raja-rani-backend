@@ -8,7 +8,8 @@ const app = express();
 app.use(cors());
 const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: "*" } });
-
+let turnTimer = null;
+let timerInterval = null;
 // ---------------- GAME STATE ----------------
 let game = {
   round: 0,
@@ -95,26 +96,55 @@ function advanceToNextActive() {
     return;
   }
 
+  // Determine next active player
   if (!game.activePlayer) {
     const raja = unfinished.find((p) => game.roles[p.name] === "Raja");
     game.activePlayer = raja
       ? { name: raja.name, socketId: raja.socketId }
       : { name: unfinished[0].name, socketId: unfinished[0].socketId };
-    return;
-  }
-
-  const currentRole = game.roles[game.activePlayer.name];
-  const curIndex = ROLE_ORDER.indexOf(currentRole);
-  for (let i = 1; i <= ROLE_ORDER.length; i++) {
-    const nextRole = ROLE_ORDER[(curIndex + i) % ROLE_ORDER.length];
-    const nextPlayer = unfinished.find((p) => game.roles[p.name] === nextRole);
-    if (nextPlayer) {
-      game.activePlayer = { name: nextPlayer.name, socketId: nextPlayer.socketId };
-      return;
+  } else {
+    const currentRole = game.roles[game.activePlayer.name];
+    const curIndex = ROLE_ORDER.indexOf(currentRole);
+    for (let i = 1; i <= ROLE_ORDER.length; i++) {
+      const nextRole = ROLE_ORDER[(curIndex + i) % ROLE_ORDER.length];
+      const nextPlayer = unfinished.find((p) => game.roles[p.name] === nextRole);
+      if (nextPlayer) {
+        game.activePlayer = { name: nextPlayer.name, socketId: nextPlayer.socketId };
+        break;
+      }
     }
   }
 
-  game.activePlayer = null;
+  // ✅ Reset previous timers
+  if (turnTimer) clearTimeout(turnTimer);
+  if (timerInterval) clearInterval(timerInterval);
+
+  // Start countdown for active player
+  if (game.activePlayer) {
+    let timeLeft = 15; // seconds
+    io.emit("timerUpdate", timeLeft); // send initial value immediately
+
+    timerInterval = setInterval(() => {
+      timeLeft--;
+      if (timeLeft >= 0) io.emit("timerUpdate", timeLeft);
+      if (timeLeft <= 0) clearInterval(timerInterval);
+    }, 1000);
+
+    // Enforce timeout
+    turnTimer = setTimeout(() => {
+      const ap = game.players.find((p) => p.name === game.activePlayer.name);
+      if (ap && !ap.inactive) {
+        ap.inactive = true;
+        game.history.push({
+          text: `⏳ ${game.roles[ap.name]} (${ap.name}) timed out → inactive (0 pts)`,
+          type: "timeout",
+        });
+        advanceToNextActive();
+        if (isRoundComplete()) game.roundActive = false;
+        broadcastPublic();
+      }
+    }, 15000);
+  }
 }
 
 function isRoundComplete() {
@@ -159,7 +189,10 @@ io.on("connection", (socket) => {
       socketId: socket.id,
       inactive: false,
     });
-    game.history.push(`✳ ${name} joined`);
+    game.history.push({
+      text: `✳ ${name} joined`,
+      type: "roundEvent"
+    });
     broadcastPublic();
     cb?.({ success: true });
   });
@@ -179,7 +212,10 @@ io.on("connection", (socket) => {
       p.scoredOnce = false;
     });
     game.roles = {};
-    game.history.push(`⚡ Round ${game.round} started`);
+    game.history.push({
+      text: `⚡ Round ${game.round} started`,
+      type: "roundEvent"
+    });
     game.roundActive = true;
 
     const shuffled = shuffleArray(ROLE_ORDER);
@@ -228,23 +264,24 @@ io.on("connection", (socket) => {
     if (target.inactive) {
       target.score += catcherPoints; // transfer points
       catcher.inactive = true;
-      game.history.push(
-        `⚠ ${catcherRole} (${catcherName}) caught inactive ${targetRole} (${targetName}) → points transferred, catcher inactive`
-      );
+      game.history.push({
+        text: `⚠ ${catcherRole} (${catcherName}) caught inactive ${targetRole} (${targetName}) → points transferred, catcher inactive`,
+        type: "neutral"
+      });
       advanceToNextActive();
       if (isRoundComplete()) game.roundActive = false;
       broadcastPublic();
-      return cb?.({ success: true });
+      return cb?.({ success: false, error: "already" }); // 🚫
     }
 
     // Correct catch
     if (targetRole === expectedRole) {
       catcher.score += catcherPoints;
-      catcher.inactive = true;
-      target.inactive = false; // target becomes active if Raja->Rani or others
-      game.history.push(
-        `✅ ${catcherRole} (${catcherName}) correctly caught ${targetRole} (${targetName}) → +${catcherPoints}`
-      );
+      catcher.inactive = true; 
+      game.history.push({
+        text: `✅ ${catcherRole} (${catcherName}) correctly caught ${targetRole} (${targetName}) → +${catcherPoints}`,
+        type: "correct"
+      });
 
       if (catcherRole === "Raja") {
         game.activePlayer = { name: targetName, socketId: target.socketId };
@@ -252,6 +289,10 @@ io.on("connection", (socket) => {
         // Round ends after Police catches Thief correctly
         game.players.forEach((p) => (p.inactive = true));
         game.roundActive = false;
+        if (turnTimer) {
+          clearTimeout(turnTimer);
+          turnTimer = null;
+        }
         io.emit("roundSummary", {
           round: game.round,
           summary: game.players.map((p) => ({
@@ -266,7 +307,12 @@ io.on("connection", (socket) => {
         advanceToNextActive();
       }
       broadcastPublic();
-      return cb?.({ success: true });
+      // If catcher scored 0 → duck/egg
+    if (catcherPoints === 0) {
+      return cb?.({ success: false, error: "zero" }); // 🥚
+    }
+
+    return cb?.({ success: true }); // 🎉
     }
 
     // Wrong catch → swap roles
@@ -275,20 +321,28 @@ io.on("connection", (socket) => {
       game.roles[catcherName],
     ];
     game.activePlayer = { name: targetName, socketId: target.socketId };
-    game.history.push(
-      `❌ ${catcherRole} (${catcherName}) wrong catch → swapped with ${targetName}`
-    );
+    game.history.push({
+      text: `❌ ${catcherRole} (${catcherName}) wrong catch → swapped with ${targetName}`,
+      type: "wrong"
+    });
 
     if (isRoundComplete()) game.roundActive = false;
     broadcastPublic();
-    cb?.({ success: true });
+    cb?.({ success: false, error: "wrong" }); // ❌
   });
 
   socket.on("forceEnd", (cb) => {
     if (!game.roundActive) return cb?.({ success: false, error: "No active round" });
     game.roundActive = false;
     game.players.forEach((p) => (p.inactive = true));
-    game.history.push(`⚡ Round ${game.round} force-ended`);
+    game.history.push({
+      text: `⚡ Round ${game.round} force-ended`,
+      type: "roundEvent"
+    });
+    if (turnTimer) {
+      clearTimeout(turnTimer);
+      turnTimer = null;
+    }
     io.emit("roundSummary", {
       round: game.round,
       summary: game.players.map((p) => ({
@@ -305,8 +359,17 @@ io.on("connection", (socket) => {
     const idx = game.players.findIndex((p) => p.socketId === socket.id);
     if (idx !== -1) {
       const removed = game.players.splice(idx, 1)[0];
-      game.history.push(`✖ ${removed.name} disconnected`);
-      if (game.activePlayer?.socketId === socket.id) advanceToNextActive();
+      game.history.push({
+        text: `✖ ${removed.name} disconnected`,
+        type: "roundEvent"
+      });
+      if (game.activePlayer?.socketId === socket.id) {
+        if (turnTimer) {
+          clearTimeout(turnTimer);
+          turnTimer = null;
+        }
+        advanceToNextActive();
+      }
       broadcastPublic();
     }
     console.log("Client disconnected:", socket.id);
