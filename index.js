@@ -672,6 +672,11 @@ if (target.inactive) {
 });
  });
 
+ // ✅ Simple homepage route for Render / UptimeRobot
+app.get("/", (req, res) => {
+  res.send("🎮 Raja Rani Game Server is Running 🟢");
+});
+
 // start server
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => console.log(`✅ Server running on http://localhost:${PORT}`));
