@@ -18,6 +18,19 @@ let game = {
   roundActive: false,
   admin: null, // 🔥 Admin socketId
 };
+function resetGame() {
+  game = {
+    round: 0,
+    players: [],
+    roles: {},
+    activePlayer: null,
+    history: [],
+    roundActive: false,
+    admin: null,
+  };
+  clearTurnTimer();
+}
+
 let turnTimer = null;       // ⏱ single-turn timeout
 let timerInterval = null;   // ⏳ for 1-sec countdown
 
@@ -352,6 +365,31 @@ function activateNextRole(nextRole) {
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
+    // ✅ Reset Game (Admin only)
+  socket.on("resetGame", () => {
+    if (socket.id !== game.admin) {
+      console.log("⚠ Non-admin tried to reset");
+      return;
+    }
+
+    function resetGame() {
+  game = {
+    round: 0,
+    players: [],
+    roles: {},
+    activePlayer: null,
+    history: [],
+    roundActive: false,
+    admin: null,
+  };
+  clearTurnTimer();
+  
+}
+
+    console.log("🔄 Game has been fully reset by admin:", socket.id);
+  });
+
+
   socket.emit("state", {
     round: game.round,
     players: game.players.map((p) => ({
@@ -672,10 +710,6 @@ if (target.inactive) {
 });
  });
 
- // ✅ Simple homepage route for Render / UptimeRobot
-app.get("/", (req, res) => {
-  res.send("🎮 Raja Rani Game Server is Running 🟢");
-});
 
 // start server
 const PORT = process.env.PORT || 4000;
