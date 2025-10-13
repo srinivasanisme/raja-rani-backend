@@ -103,13 +103,7 @@ const gameState = {
   turnTimer: null,
 };
 
-// ✅ Helper functions
-function clearRoleTimer() {
-  if (gameState.roleTimer) {
-    clearTimeout(gameState.roleTimer);
-    gameState.roleTimer = null;
-  }
-}
+
 
 function clearTurnTimer() {
   if (turnTimer) {
@@ -229,15 +223,6 @@ function isRoundComplete() {
   return game.players.every((p) => p.inactive);
 }
 
-  function startRoleTimer(role) {
-  clearRoleTimer();
-  gameState.currentRole = role;
-  gameState.currentRoleStartTime = Date.now();
-
-  gameState.roleTimer = setTimeout(() => {
-    handleRoleTimeout(role);
-  }, ROLE_TIME_LIMIT);
-}
 
 function handleRoleTimeout(role) {
   console.log(`${role} role timed out`);
@@ -366,8 +351,7 @@ function activateNextRole(nextRole) {
 
 // ---------------- SOCKET.IO ----------------
 io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
-
+   console.log("New connection:", socket.id);
   socket.emit("state", {
     round: game.round,
     players: game.players.map((p) => ({
@@ -389,6 +373,8 @@ io.on("connection", (socket) => {
     admin: game.admin,
     adminName: game.players.find(p => p.socketId === game.admin)?.name || null,
   });
+
+
 
 // Add player
   socket.on("joinGame", ({ name, isAdmin }, cb) => {
@@ -424,49 +410,43 @@ if (isPlayerAdmin) game.admin = socket.id;
   });
 
   // Start round
-  socket.on("startRound", (cb) => {
-    if (socket.id !== game.admin)
-      return cb?.({ success: false, error: "Only admin can start" });
-    if (game.players.length !== 10)
-      return cb?.({ success: false, error: "Need exactly 10 players" });
+socket.on("startRound", (cb) => {
+  if (socket.id !== game.admin)
+    return cb?.({ success: false, error: "Only admin can start" });
 
-    // ✅ Minimum 5 humans, fill rest with AI bots
-  const humanCount = game.players.filter(p => !p.isBot).length;
-  if (humanCount < 5) {
-    const botsNeeded = 5 - humanCount;
-    for (let i = 0; i < botsNeeded; i++) {
-      game.players.push({
-        name: `Bot${i+1}`,
-        socketId: `bot-${i+1}`,
-        inactive: false,
-        isBot: true,
-        score: 0
-      });
-    }
+  // ✅ Require exactly 10 human players
+  if (game.players.length !== 10) {
+    return cb?.({ success: false, error: "Exactly 10 players required to start the round" });
   }
-    game.round++;
-    game.players.forEach((p) => {
-      p.inactive = false;
-      p.scoredOnce = false;
-    });
-    game.roles = {};
-    game.history.push({
-      text: `⚡ Round ${game.round} started`,
-      type: "roundEvent"
-    });
-    game.roundActive = true;
 
-    const shuffled = shuffleArray(ROLE_ORDER);
-    for (let i = 0; i < game.players.length; i++) {
-      game.roles[game.players[i].name] = shuffled[i % shuffled.length];
-    }
-
-    // Start with Raja
-    startRoleTimer("Raja");          // start role timer
-    advanceToNextActive(true);           // pick first active player (Raja)
-    broadcastPublic();               // send initial state to everyone
-    cb?.({ success: true });
+  // 🟢 Start the round
+  game.round++;
+  game.players.forEach((p) => {
+    p.inactive = false;
+    p.scoredOnce = false;
   });
+
+  game.roles = {};
+  game.history.push({
+    text: `⚡ Round ${game.round} started`,
+    type: "roundEvent",
+  });
+  game.roundActive = true;
+
+  // 🌀 Shuffle roles and assign to each of the 10 players
+  const shuffled = shuffleArray(ROLE_ORDER);
+  for (let i = 0; i < game.players.length; i++) {
+    game.roles[game.players[i].name] = shuffled[i % shuffled.length];
+  }
+
+  // 👑 Start with Raja
+  advanceToNextActive(true);
+  startTurnForActive(TURN_TIME_LIMIT);
+  broadcastPublic();
+
+  cb?.({ success: true });
+});
+
 
   // Attempt catch
   socket.on("attemptCatch", ({ catcherName, targetName }, cb) => {
@@ -651,6 +631,18 @@ if (target.inactive) {
     broadcastPublic();
     cb?.({ success: true });
   });
+
+        // Feedback from a player
+socket.on("sendFeedback", (data) => {
+  const { player, text } = data;
+  if (!text || !player) return;
+
+  const feedbackMsg = { player, text };
+  
+  // Broadcast to all clients
+  io.emit("newFeedback", feedbackMsg);
+});
+
 
   socket.on("disconnect", () => {
   const idx = game.players.findIndex((p) => p.socketId === socket.id);
